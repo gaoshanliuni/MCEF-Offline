@@ -1,0 +1,355 @@
+
+plugins {
+    // Required for NeoGradle
+    id "org.jetbrains.gradle.plugin.idea-ext" version "1.3"
+}
+
+tasks.named("updateDaemonJvm") {
+    languageVersion = JavaLanguageVersion.of(providers.gradleProperty("java_version").get().toInteger())
+    toolchainPlatforms = []
+}
+
+def getJcefRepoUrl(Project project) {
+    def defaultUrl = "https://github.com/CinemaMod/java-cef.git"
+    def modulesFile = project.file('.gitmodules')
+    if (!modulesFile.exists()) {
+        return defaultUrl
+    }
+
+    def inJcefSection = false
+    for (String rawLine : modulesFile.readLines()) {
+        def line = rawLine.trim()
+        if (line.startsWith('[submodule ')) {
+            inJcefSection = line == '[submodule "common/java-cef"]'
+            continue
+        }
+        if (inJcefSection && line.startsWith('url =')) {
+            return line.substring('url ='.length()).trim()
+        }
+    }
+    return defaultUrl
+}
+
+def runGit(Project project, List<String> args, boolean failOnError = true) {
+    def command = ['git'] + args
+    def process = new ProcessBuilder(command)
+            .directory(project.rootDir)
+            .redirectErrorStream(true)
+            .start()
+    def output = process.inputStream.getText('UTF-8')
+    def exitValue = process.waitFor()
+    if (failOnError && exitValue != 0) {
+        throw new GradleException("Git command failed (${command.join(' ')}):\n${output}".trim())
+    }
+    return [exitValue: exitValue, output: output]
+}
+
+def isTrackedSubmodule(Project project, String submodulePath) {
+    def result = runGit(project, ['ls-files', '--stage', '--', submodulePath], false)
+    if (result.exitValue != 0) {
+        return false
+    }
+    return result.output.readLines().any { it.startsWith('160000 ') }
+}
+
+tasks.register('syncJcef') {
+    doLast {
+        def jcefPath = 'common/java-cef'
+        def jcefDir = rootProject.file(jcefPath)
+        def repoUrl = getJcefRepoUrl(rootProject)
+        def jcefGitMetadata = new File(jcefDir, '.git')
+        def trackedAsSubmodule = isTrackedSubmodule(rootProject, jcefPath)
+
+        if (trackedAsSubmodule) {
+            runGit(rootProject, ['submodule', 'sync', '--', jcefPath])
+            return
+        }
+
+        if (jcefGitMetadata.exists()) {
+            runGit(rootProject, ['-C', jcefDir.absolutePath, 'remote', 'set-url', 'origin', repoUrl])
+            return
+        }
+    }
+}
+
+tasks.register('cloneJcef') {
+    dependsOn 'syncJcef'
+    doLast {
+        def jcefPath = 'common/java-cef'
+        def jcefDir = rootProject.file(jcefPath)
+        def repoUrl = getJcefRepoUrl(rootProject)
+        def jcefGitMetadata = new File(jcefDir, '.git')
+        def trackedAsSubmodule = isTrackedSubmodule(rootProject, jcefPath)
+
+        if (jcefGitMetadata.exists()) {
+            return
+        }
+
+        if (trackedAsSubmodule) {
+            runGit(rootProject, ['submodule', 'update', '--init', '--recursive', jcefPath])
+            return
+        }
+
+        if (jcefDir.exists()) {
+            def contents = jcefDir.listFiles()
+            if (contents != null && contents.length > 0) {
+                throw new GradleException("Cannot clone java-cef into ${jcefDir}: directory exists and is not empty.")
+            }
+        }
+
+        logger.lifecycle("java-cef is not tracked as a submodule in this checkout; cloning directly from ${repoUrl}.")
+        runGit(rootProject, ['clone', '--recursive', repoUrl, jcefDir.absolutePath])
+    }
+}
+
+// https://gist.github.com/JonasGroeger/7620911
+def getCheckedOutGitCommitHash(Project mcefParent) {
+    def takeFromHash = 40
+    def headCandidates = []
+    def submoduleHead = new File(mcefParent.projectDir, ".git/modules/common/java-cef/HEAD")
+    headCandidates.add(submoduleHead)
+
+    def jcefGitPath = new File(mcefParent.projectDir, "common/java-cef/.git")
+    if (jcefGitPath.isDirectory()) {
+        headCandidates.add(new File(jcefGitPath, "HEAD"))
+    } else if (jcefGitPath.isFile()) {
+        def pointer = jcefGitPath.text.trim()
+        if (pointer.startsWith("gitdir:")) {
+            def gitDirLocation = pointer.substring("gitdir:".length()).trim()
+            headCandidates.add(new File(jcefGitPath.parentFile, "${gitDirLocation}/HEAD"))
+        }
+    }
+
+    for (File gitHeadFile : headCandidates) {
+        if (!gitHeadFile.exists()) {
+            continue
+        }
+
+        /*
+         * '.git/HEAD' contains either
+         *      in case of detached head: the currently checked out commit hash
+         *      otherwise: a reference to a file containing the current commit hash
+         */
+        def head = gitHeadFile.text.split(":")
+        def isCommit = head.length == 1
+        if (isCommit) {
+            return head[0].trim().take(takeFromHash)
+        }
+
+        def refHead = new File(gitHeadFile.parentFile, head[1].trim())
+        if (refHead.exists()) {
+            return refHead.text.trim().take(takeFromHash)
+        }
+    }
+
+    return ""
+}
+
+subprojects {
+
+    apply plugin: 'java'
+
+    java.toolchain.languageVersion = JavaLanguageVersion.of(java_version.toInteger())
+    java.withSourcesJar()
+//    java.withJavadocJar()
+
+    jar {
+        from(rootProject.file("LICENSE")) {
+            rename { "${it}_${mod_name}" }
+        }
+        manifest {
+            attributes([
+                    'Specification-Title'     : mod_name,
+                    'Specification-Vendor'    : mod_authors,
+                    'Specification-Version'   : mod_version,
+                    'Implementation-Title'    : mod_name,
+                    'Implementation-Version'  : mod_version,
+                    'Implementation-Vendor'   : mod_authors,
+                    'Built-On-Java'           : "${System.getProperty('java.vm.version')} (${System.getProperty('java.vm.vendor')})",
+                    'Built-On-Minecraft'      : minecraft_version,
+                    'java-cef-commit'         : getCheckedOutGitCommitHash(rootProject)
+            ])
+        }
+    }
+
+    sourcesJar {
+        from(rootProject.file("LICENSE")) {
+            rename { "${it}_${mod_name}" }
+        }
+    }
+
+    repositories {
+        mavenCentral()
+
+        exclusiveContent {
+            forRepository {
+                maven {
+                    name = 'Sponge / Mixin'
+                    url = 'https://repo.spongepowered.org/repository/maven-public/'
+                }
+            }
+            filter {
+                includeGroup 'org.spongepowered'
+                includeGroup 'org.spongepowered.mixin'
+            }
+        }
+
+        exclusiveContent {
+            forRepository {
+                maven {
+                    name = "CurseMaven"
+                    url = "https://cursemaven.com"
+                }
+            }
+            filter {
+                includeGroup "curse.maven"
+            }
+        }
+
+        exclusiveContent {
+            forRepository {
+                maven {
+                    name = "Modrinth"
+                    url = "https://api.modrinth.com/maven"
+                }
+            }
+            filter {
+                includeGroup "maven.modrinth"
+            }
+        }
+
+        exclusiveContent {
+            forRepository {
+                maven {
+                    name = "JitPack"
+                    url = 'https://jitpack.io'
+                }
+            }
+            filter {
+                includeGroup 'com.github.rtyley'
+                includeGroup 'com.github.DhyanB'
+            }
+        }
+
+        exclusiveContent {
+            forRepository {
+                maven {
+                    name = "Keksuccino"
+                    url = "https://keksuccino.github.io/maven/"
+                }
+            }
+            filter {
+                includeGroupByRegex 'com\\.github\\.Keksuccino(\\..*)?'
+                includeGroupByRegex 'com\\.keksuccino(\\..*)?'
+                includeGroupByRegex 'de\\.keksuccino(\\..*)?'
+            }
+        }
+
+        exclusiveContent {
+            forRepository {
+                maven {
+                    name = 'ParchmentMC Maven'
+                    url = 'https://maven.parchmentmc.org'
+                }
+            }
+            filter {
+                includeGroupByRegex 'org\\.parchmentmc(\\..*)?'
+            }
+        }
+        // Crystal Nest repository where Fancy Entity Renderer is hosted.
+        exclusiveContent {
+            forRepository {
+                maven {
+                    name = "Crystal Nest"
+                    url = "https://maven.crystalnest.it"
+                }
+            }
+            filter {
+                includeGroup "it.crystalnest"
+            }
+        }
+    }
+
+    dependencies {
+        components.all { component ->
+            def id = component.id
+            if (id instanceof org.gradle.api.artifacts.component.ModuleComponentIdentifier) {
+                def stableGroups = [
+                        'maven.modrinth',
+                        'curse.maven',
+                        'com.github.Keksuccino',
+                        'com.github.rtyley',
+                        'net.fabricmc',
+                        'net.fabricmc.fabric-api',
+                        'net.minecraftforge',
+                        'net.neoforged',
+                        'org.spongepowered',
+                        'com.cinemamod',
+                        'org.parchmentmc',
+                        'org.parchmentmc.data'
+                ]
+                if (id.group in stableGroups) {
+                    component.changing = false
+                }
+            }
+        }
+    }
+
+    if (providers.gradleProperty("mcef.enableDependencyLocking").map { it.toBoolean() }.orElse(false).get()) {
+        dependencyLocking {
+            // Enable with -Pmcef.enableDependencyLocking=true and generate/update locks via:
+            // ./gradlew --write-locks <task>
+            lockMode = org.gradle.api.artifacts.dsl.LockMode.LENIENT
+            lockAllConfigurations()
+        }
+    }
+
+    configurations.configureEach {
+        resolutionStrategy {
+            cacheChangingModulesFor 168, 'hours'
+            cacheDynamicVersionsFor 168, 'hours'
+        }
+    }
+
+    tasks.withType(JavaCompile).configureEach {
+        it.options.encoding = 'UTF-8'
+        it.options.getRelease().set(java_version.toInteger())
+        it.options.compilerArgs += ['-Xlint:-deprecation', '-Xlint:-removal']
+    }
+
+    processResources {
+        def expandProps = [
+                "group": project.group,
+                "mod_name": mod_name,
+                "mod_id": mod_id,
+                "mod_version": mod_version,
+                "mod_description": mod_description,
+                "mod_license": mod_license,
+                "mod_authors": mod_authors,
+                "minecraft_version": minecraft_version,
+                "java_version": java_version,
+                "fabric_version": fabric_version,
+                "fabric_short_version": fabric_short_version,
+                "fabric_loader_version": fabric_loader_version,
+                "neoforge_version": neoforge_version,
+                "neoforge_loader_version": neoforge_loader_version,
+                "parchment_version": parchment_version,
+                "parchment_mc_version": parchment_mc_version,
+                "mixin_extras_version": mixin_extras_version,
+                "fabric_loom_version": fabric_loom_version,
+                "neogradle_version": neogradle_version
+        ]
+        filesMatching(['pack.mcmeta', 'fabric.mod.json', 'META-INF/mods.toml', 'META-INF/neoforge.mods.toml', '*.mixins.json']) {
+            expand expandProps
+        }
+        inputs.properties(expandProps)
+    }
+
+    // Disables Gradle's custom module metadata from being published to maven. The
+    // metadata includes mapped dependencies which are not reasonably consumable by
+    // other mod developers.
+    tasks.withType(GenerateModuleMetadata).configureEach {
+        enabled = false
+    }
+
+}

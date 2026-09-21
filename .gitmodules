@@ -1,0 +1,3 @@
+[submodule "common/java-cef"]
+	path = common/java-cef
+	url = https://github.com/Keksuccino/java-cef.git
