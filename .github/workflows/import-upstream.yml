@@ -1,0 +1,51 @@
+name: Import pinned MCEF source
+
+on:
+  push:
+    branches: [main]
+    paths: [.github/workflows/import-upstream.yml]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: import-mcef-source
+  cancel-in-progress: false
+
+jobs:
+  import:
+    if: github.repository == 'gaoshanliuni/MCEF-Offline' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+      - name: Import source snapshot without upstream history
+        shell: bash
+        run: |
+          set -euo pipefail
+          if test -e UPSTREAM.lock; then
+            echo 'Pinned source already imported; refusing to overwrite fork changes.'
+            exit 0
+          fi
+          upstream=e2a48d91ab08b5f5898ba440dbb69e57b6355615
+          jcef=eaeb3d4370aa3526ee237ad1981ad59af3de4dd1
+          git remote add mcef-upstream https://github.com/Keksuccino/Rinku.git
+          git fetch --no-tags --depth=1 mcef-upstream "$upstream"
+          test "$(git rev-parse FETCH_HEAD)" = "$upstream"
+          while IFS= read -r path; do
+            case "$path" in README.md|.github|AGENTS.md) continue ;; esac
+            git restore --source="$upstream" --staged --worktree -- "$path"
+          done < <(git ls-tree --name-only "$upstream")
+          test "$(git ls-files --stage common/java-cef | awk '{print $2}')" = "$jcef"
+          printf 'repository=Keksuccino/Rinku\ncommit=%s\njcef_repository=CinemaMod/java-cef\njcef_commit=%s\n' "$upstream" "$jcef" > UPSTREAM.lock
+          git add UPSTREAM.lock
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'Import MCEF 2.2.0 source snapshot with pinned JCEF submodule'
+          git push origin HEAD:main
