@@ -1,0 +1,6 @@
+CEF-LICENSE.txt: chromiumembedded/cef commit d8c85ac, LICENSE.txt.
+CHROMIUM-LICENSE.txt: chromium/chromium tag 116.0.5845.190, LICENSE.
+JCEF-LICENSE.txt: CinemaMod/java-cef commit eaeb3d4370aa3526ee237ad1981ad59af3de4dd1, LICENSE.txt (added during release packaging).
+MCEF-LICENSE.txt: this repository LICENSE (added during release packaging).
+
+The pinned JCEF CMakeLists.txt identifies CEF 116.0.27+gd8c85ac+chromium-116.0.5845.190. These notices are retained inside installable platform JARs. Individual Chromium third-party components keep their own respective notices and license terms.
