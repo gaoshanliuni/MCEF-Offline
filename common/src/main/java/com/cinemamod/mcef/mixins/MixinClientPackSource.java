@@ -1,10 +1,12 @@
+/* SPDX-License-Identifier: LGPL-2.1-or-later
+ * Offline initialization, modified for MCEF Offline in 2026.
+ */
 package com.cinemamod.mcef.mixins;
 
 import com.cinemamod.mcef.MCEF;
-import com.cinemamod.mcef.MCEFDownloader;
 import com.cinemamod.mcef.MCEFPlatform;
-import com.cinemamod.mcef.MCEFSettings;
 import com.cinemamod.mcef.internal.MCEFDownloadListener;
+import com.cinemamod.mcef.offline.OfflineRuntime;
 import net.minecraft.client.resources.ClientPackSource;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -13,132 +15,39 @@ import org.spongepowered.asm.mixin.Unique;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
-import java.io.File;
-import java.io.IOException;
+import java.nio.file.Path;
 
-/**
- * <p>
- * mcef.libraries.path is where MCEF will store any required binaries. By default,
- * /path/to/.minecraft/mods/mcef-libraries.
- * <p>
- * jcef.path is the location of the standard java-cef bundle. By default,
- * /path/to/mcef-libraries/<normalized platform name> where normalized platform name comes from
- * {@link MCEFPlatform#getNormalizedName()}. This is what java-cef uses internally to find the
- * installation. Also see {@link org.cef.CefApp}.
- */
 @Mixin(ClientPackSource.class)
 public class MixinClientPackSource {
-    @Unique
-    private static final Logger LOGGER = LoggerFactory.getLogger("MCEF");
+    @Unique private static final Logger LOGGER = LoggerFactory.getLogger("MCEF");
 
     @Inject(at = @At("HEAD"), method = "<clinit>")
     private static void on_clinit_MCEF(CallbackInfo callbackInfo) {
         MCEFDownloadListener.INSTANCE.setDone(false);
         MCEFDownloadListener.INSTANCE.setFailed(false);
-        MCEFDownloadListener.INSTANCE.setTask("Preparing Download");
-
-        try {
-            setupLibraryPath_MCEF();
-        } catch (IOException e) {
-            failDownload_MCEF("Failed to prepare MCEF library paths", e);
-            return;
-        }
-
-        Thread downloadThread = new Thread(MixinClientPackSource::runDownloaderFlow_MCEF, "MCEF-Downloader");
-        downloadThread.setDaemon(true);
-        downloadThread.start();
+        MCEFDownloadListener.INSTANCE.setTask("Preparing bundled Chromium runtime (offline)");
+        Thread installer = new Thread(MixinClientPackSource::installOffline_MCEF, "MCEF-Offline-Installer");
+        installer.setDaemon(true);
+        installer.start();
     }
 
     @Unique
-    private static void setupLibraryPath_MCEF() throws IOException {
-        final File mcefLibrariesDir;
-
-        // Check for development environment
-        // TODO: handle eclipse/others
-        // i.e. mcef-repo/neoforge/build
-        File buildDir = new File("../build");
-        if (buildDir.exists() && buildDir.isDirectory()) {
-            mcefLibrariesDir = new File(buildDir, "mcef-libraries/");
-        } else {
-            mcefLibrariesDir = new File("mods/mcef-libraries/");
-        }
-
-        mcefLibrariesDir.mkdirs();
-
-        System.setProperty("mcef.libraries.path", mcefLibrariesDir.getCanonicalPath());
-        System.setProperty("jcef.path", new File(mcefLibrariesDir, MCEFPlatform.getPlatform().getNormalizedName()).getCanonicalPath());
-    }
-
-    @Unique
-    private static void runDownloaderFlow_MCEF() {
+    private static void installOffline_MCEF() {
         try {
-            String javaCefCommit = MCEF.getJavaCefCommit();
-            LOGGER.info("java-cef commit: " + javaCefCommit);
-
-            MCEFSettings settings = MCEF.getSettings();
-            MCEFPlatform platform = MCEFPlatform.getPlatform();
-            MCEFDownloader downloader = new MCEFDownloader(
-                    settings.getDownloadMirror(),
-                    javaCefCommit,
-                    platform,
-                    settings.createDownloadPolicy()
-            );
-
-            File mcefLibrariesDir = new File(System.getProperty("mcef.libraries.path"));
-            File platformLibrariesDir = new File(mcefLibrariesDir, platform.getNormalizedName());
-            boolean hasPlatformLibrariesDir = platformLibrariesDir.exists() && platformLibrariesDir.isDirectory();
-
-            if (settings.isSkipDownload()) {
-                if (!hasPlatformLibrariesDir) {
-                    failDownload_MCEF("skip-download=true but local MCEF libraries are missing", null);
-                    return;
-                }
-                MCEFDownloadListener.INSTANCE.setDone(true);
-                return;
-            }
-
-            boolean hasChecksumResult = false;
-            boolean checksumMatches = false;
-            try {
-                checksumMatches = downloader.downloadJavaCefChecksum();
-                hasChecksumResult = true;
-            } catch (IOException e) {
-                if (settings.isEnforceDownloadChecksums()) {
-                    failDownload_MCEF("Failed to download JCEF checksum", e);
-                    return;
-                }
-                LOGGER.warn("Failed to download JCEF checksum with checksum enforcement disabled", e);
-            }
-
-            boolean downloadJcefBuild = !hasPlatformLibrariesDir || (hasChecksumResult && !checksumMatches);
-
-            if (downloadJcefBuild) {
-                try {
-                    downloader.downloadJavaCefBuild();
-                    downloader.extractJavaCefBuild(true);
-                } catch (IOException e) {
-                    failDownload_MCEF("Failed to download or extract JCEF", e);
-                    return;
-                }
-            }
-
+            String commit = MCEF.getJavaCefCommit();
+            String platform = MCEFPlatform.getPlatform().getNormalizedName();
+            Path root = Path.of(".").toRealPath().resolve("mods/mcef-libraries/offline");
+            Path installed = OfflineRuntime.install(root, platform, commit,
+                    task -> MCEFDownloadListener.INSTANCE.setTask(task));
+            System.setProperty("mcef.libraries.path", installed.getParent().toString());
+            System.setProperty("jcef.path", installed.toString());
+            LOGGER.info("MCEF Offline: local runtime ready at {} (JCEF {}, {}). No download was requested.", installed, commit, platform);
+            MCEFDownloadListener.INSTANCE.setProgress(1.0f);
             MCEFDownloadListener.INSTANCE.setDone(true);
-        } catch (IOException e) {
-            failDownload_MCEF("Failed to initialize JCEF downloader", e);
-        } catch (RuntimeException e) {
-            failDownload_MCEF("JCEF downloader failed due to an invalid configuration", e);
+        } catch (Exception e) {
+            LOGGER.error("MCEF Offline could not install/repair the bundled runtime. No network fallback will be attempted.", e);
+            MCEFDownloadListener.INSTANCE.setTask("Offline runtime unavailable: check matching platform JAR and logs");
+            MCEFDownloadListener.INSTANCE.setFailed(true);
         }
     }
-
-    @Unique
-    private static void failDownload_MCEF(String task, Exception e) {
-        if (e != null) {
-            LOGGER.error(task, e);
-        } else {
-            LOGGER.error(task);
-        }
-        MCEFDownloadListener.INSTANCE.setTask(task);
-        MCEFDownloadListener.INSTANCE.setFailed(true);
-    }
-
 }

@@ -1,0 +1,124 @@
+name: Build offline MCEF
+
+on:
+  push:
+    branches: [main]
+    paths-ignore: ['README.md', 'offline/*.md', '.github/workflows/import-upstream.yml']
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: offline-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  test:
+    name: Local-only installer tests / ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-2025, macos-15]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
+        with:
+          distribution: temurin
+          java-version: '25'
+      - run: python3 offline/test.py
+      - run: python3 offline/test_package.py
+
+  build:
+    name: Compile NeoForge fork
+    runs-on: windows-2025
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          submodules: recursive
+          persist-credentials: false
+      - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
+        with:
+          distribution: temurin
+          java-version: '25'
+      - uses: gradle/actions/setup-gradle@0723195856401067f7a2779048b490ace7a47d7c # v5
+        with:
+          validate-wrappers: true
+          cache-read-only: ${{ github.ref != 'refs/heads/main' }}
+          dependency-graph: disabled
+      - name: Verify pinned JCEF source
+        shell: pwsh
+        run: |
+          $actual = (& git -C common/java-cef rev-parse HEAD).Trim()
+          if ($LASTEXITCODE -ne 0 -or $actual -ne 'eaeb3d4370aa3526ee237ad1981ad59af3de4dd1') { throw 'JCEF_SOURCE_LOCK_MISMATCH' }
+      - name: Compile full fork
+        shell: pwsh
+        run: |
+          & ./gradlew.bat :neoforge:jarJar :neoforge:sourcesJar --no-daemon --no-configuration-cache --max-workers=2 --console=plain
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Package compile dependency and complete corresponding source
+        run: python3 offline/package.py base
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: offline-base
+          path: build/offline-base/*
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+
+  platforms:
+    name: Bundle runtime / ${{ matrix.platform }}
+    needs: build
+    strategy:
+      fail-fast: false
+      max-parallel: 3
+      matrix:
+        platform: [windows_amd64, windows_arm64, linux_amd64, linux_arm64, macos_amd64, macos_arm64]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: offline-base
+          path: build/offline-base
+      - name: Verify and embed the pinned native build
+        run: python3 offline/package.py platform --base build/offline-base/mcef-offline-neoforge-api.jar --platform '${{ matrix.platform }}'
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: offline-platform-${{ matrix.platform }}
+          path: build/offline-platform/*
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+
+  publish:
+    name: Publish verified platform attachments
+    needs: [test, build, platforms]
+    if: github.repository == 'gaoshanliuni/MCEF-Offline' && github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: offline-*
+          merge-multiple: true
+          path: build/release-assets
+      - name: Verify all assets and publish an immutable prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 offline/publish.py
