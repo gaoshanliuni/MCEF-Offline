@@ -1,5 +1,4 @@
 name: Build offline MCEF
-
 on:
   push:
     branches: [main]
@@ -7,14 +6,11 @@ on:
   pull_request:
     branches: [main]
   workflow_dispatch:
-
 permissions:
   contents: read
-
 concurrency:
   group: offline-${{ github.ref }}
   cancel-in-progress: false
-
 jobs:
   test:
     name: Local-only installer tests / ${{ matrix.os }}
@@ -34,7 +30,7 @@ jobs:
           java-version: '25'
       - run: python3 offline/test.py
       - run: python3 offline/test_package.py
-
+      - run: python3 offline/test_architecture.py
   build:
     name: Compile NeoForge fork
     runs-on: windows-2025
@@ -72,27 +68,32 @@ jobs:
           if-no-files-found: error
           compression-level: 0
           retention-days: 7
-
   platforms:
-    name: Bundle runtime / ${{ matrix.platform }}
+    name: Verify and bundle / ${{ matrix.platform }}
     needs: build
     strategy:
       fail-fast: false
       max-parallel: 3
       matrix:
-        platform: [windows_amd64, windows_arm64, linux_amd64, linux_arm64, macos_amd64, macos_arm64]
+        platform: [windows_amd64, linux_amd64, macos_amd64, macos_arm64]
     runs-on: ubuntu-24.04
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           persist-credentials: false
+      - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
+        with:
+          distribution: temurin
+          java-version: '25'
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: offline-base
           path: build/offline-base
-      - name: Verify and embed the pinned native build
+      - name: Verify native CPU architecture and embed the pinned build
         run: python3 offline/package.py platform --base build/offline-base/mcef-offline-neoforge-api.jar --platform '${{ matrix.platform }}'
+      - name: Verify actual JAR extraction, cache reuse and repair without loading native code
+        run: java -cp 'build/offline-platform/mcef-offline-neoforge-${{ matrix.platform }}.jar' offline/OfflineBundleCheck.java '${{ matrix.platform }}' eaeb3d4370aa3526ee237ad1981ad59af3de4dd1
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: offline-platform-${{ matrix.platform }}
@@ -100,7 +101,6 @@ jobs:
           if-no-files-found: error
           compression-level: 0
           retention-days: 7
-
   publish:
     name: Publish verified platform attachments
     needs: [test, build, platforms]

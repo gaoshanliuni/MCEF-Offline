@@ -15,9 +15,12 @@ import tarfile
 import time
 import urllib.request
 import zipfile
+from native_architecture import binary_architectures, verify_native_architecture
 
 ROOT = Path(__file__).resolve().parent.parent
-PLATFORMS = ('windows_amd64', 'windows_arm64', 'linux_amd64', 'linux_arm64', 'macos_amd64', 'macos_arm64')
+# The pinned upstream Windows/Linux ARM64 archives contain x64 binaries.
+# Never advertise those archives as native ARM64 builds.
+PLATFORMS = ('windows_amd64', 'linux_amd64', 'macos_amd64', 'macos_arm64')
 JCEF = 'eaeb3d4370aa3526ee237ad1981ad59af3de4dd1'
 UPSTREAM = 'e2a48d91ab08b5f5898ba440dbb69e57b6355615'
 REPOSITORY = 'gaoshanliuni/MCEF-Offline'
@@ -144,7 +147,6 @@ def convert_native(native: Path, platform: str, out_zip: Path, properties: Path)
 
 
 def manifest_bytes(raw: bytes, attributes: dict[str, str]) -> bytes:
-    # Reconstitute the main JAR manifest, including continuation lines.
     lines = raw.decode('utf-8').replace('\r\n', '\n').split('\n')
     values: dict[str, str] = {}
     key: str | None = None
@@ -233,7 +235,7 @@ def make_base(input_dir: Path, output: Path) -> None:
 
 def make_platform(base: Path, platform: str, output: Path) -> None:
     if platform not in PLATFORMS:
-        raise ValueError('Unsupported platform')
+        raise ValueError('Unsupported platform; see offline/UNSUPPORTED_PLATFORMS.md')
     output.mkdir(parents=True, exist_ok=True)
     cache = ROOT / 'build/native-inputs' / platform
     cache.mkdir(parents=True, exist_ok=True)
@@ -251,11 +253,9 @@ def make_platform(base: Path, platform: str, output: Path) -> None:
         raise ValueError('Upstream native archive SHA-256 mismatch')
     bundle, props = cache / 'runtime.zip', cache / 'runtime.properties'
     metadata = convert_native(native, platform, bundle, props)
-    paths = metadata.pop('paths')
+    metadata.pop('paths')
     required = ('jcef.dll', 'libcef.dll') if platform.startswith('windows') else ('libjcef.so', 'libcef.so') if platform.startswith('linux') else ('libjcef.dylib', 'Chromium Embedded Framework')
-    for name in required:
-        if not any(PurePosixPath(p).name == name for p in paths):
-            raise ValueError('Native runtime is missing essential library: ' + name)
+    metadata['nativeArchitectures'] = verify_native_architecture(bundle, platform, required)
     prefix = f'mcef-offline/{platform}/'
     artifact = output / f'mcef-offline-neoforge-{platform}.jar'
     copy_jar(base, artifact, {'MCEF-Offline-Distribution': platform}, {prefix+'runtime.zip': bundle, prefix+'runtime.properties': props,
@@ -274,6 +274,9 @@ def release_manifest(directory: Path) -> None:
         item = json.loads((directory / f'MCEF-OFFLINE-{platform}.json').read_text())
         if item['jcefCommit'] != JCEF or item['platform'] != platform or record(directory / item['file']) != {key:item[key] for key in ('file','sha256','size')}:
             raise ValueError('Platform artifact identity mismatch')
+        expected_cpu = platform.rsplit('_',1)[1]
+        if not item.get('nativeArchitectures') or any(expected_cpu not in values for values in item['nativeArchitectures'].values()):
+            raise ValueError('Missing/mismatched native architecture attestation')
         platforms[platform] = item
     for key in ('api', 'sources'):
         if record(directory / identity[key]['file']) != identity[key]:
