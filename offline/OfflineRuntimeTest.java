@@ -48,8 +48,17 @@ public final class OfflineRuntimeTest {
         Path first = install(base.resolve("normal"), fixture, reads);
         check(Files.isRegularFile(first.resolve("bin/native.bin")), "fresh install");
         check(reads.get() == 1, "one local archive read");
+        check(first.getParent().getFileName().toString().matches("g-[a-f0-9]{32}"), "compact generation directory");
         check(first.equals(install(base.resolve("normal"), fixture, reads)), "reuse verified local installation");
         check(reads.get() == 1, "cached install does not reopen embedded archive");
+        // Legacy long directory pointers must not keep an installation on the broken native path.
+        Path legacy = first.getParent().getParent().resolve("a".repeat(64) + "-" + UUID.randomUUID());
+        Files.move(first.getParent(), legacy);
+        Files.writeString(legacy.getParent().resolve("current.txt"), legacy.getFileName().toString());
+        Path migrated = install(base.resolve("normal"), fixture, reads);
+        check(migrated.getParent().getFileName().toString().matches("g-[a-f0-9]{32}"), "legacy long path migrated");
+        check(Files.exists(legacy), "legacy possibly loaded runtime retained");
+        first = migrated;
         Files.writeString(first.resolve("bin/native.bin"), "corrupt");
         Path repaired = install(base.resolve("normal"), fixture, reads);
         check(!first.equals(repaired), "repair creates new generation");
@@ -66,6 +75,14 @@ public final class OfflineRuntimeTest {
         check(!Files.exists(base.resolve("truncated").resolve(COMMIT).resolve(PLATFORM).resolve("current.txt")), "failed install not marked complete");
         fails(() -> OfflineRuntime.install(base.resolve("wrong"), PLATFORM, "f".repeat(40),
                 name -> new ByteArrayInputStream(fixture.get(name)), ignored -> {}), "wrong commit must fail");
+        Map<String,byte[]> win = new HashMap<>();
+        fixture.forEach((key,value) -> win.put(key.replace(PLATFORM,"windows_amd64"),
+                key.endsWith(".properties") ? new String(value, StandardCharsets.US_ASCII).replace(PLATFORM,"windows_amd64").getBytes(StandardCharsets.US_ASCII) : value));
+        Path tooLong = base.resolve("long-game-directory-".repeat(10));
+        fails(() -> OfflineRuntime.install(tooLong, "windows_amd64", COMMIT,
+                name -> {byte[] data=win.get(name); return data==null ? null : new ByteArrayInputStream(data);}, ignored -> {}),
+                "native path budget must reject before extraction");
+        check(!Files.exists(tooLong), "overlong root rejected before writing files");
         ExecutorService pool = Executors.newFixedThreadPool(2);
         try {
             var a = pool.submit(() -> install(base.resolve("concurrent"), fixture, reads));

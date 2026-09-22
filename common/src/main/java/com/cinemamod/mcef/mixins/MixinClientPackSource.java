@@ -36,8 +36,8 @@ public class MixinClientPackSource {
         try {
             String commit = MCEF.getJavaCefCommit();
             String platform = MCEFPlatform.getPlatform().getNormalizedName();
-            Path root = Path.of(".").toRealPath().resolve("mods/mcef-libraries/offline");
-            Path installed = OfflineRuntime.install(root, platform, commit,
+            Path gameDirectory = Path.of(".").toRealPath();
+            Path installed = OfflineRuntime.installForGame(gameDirectory, platform, commit,
                     task -> MCEFDownloadListener.INSTANCE.setTask(task));
             System.setProperty("mcef.libraries.path", installed.getParent().toString());
             System.setProperty("jcef.path", installed.toString());

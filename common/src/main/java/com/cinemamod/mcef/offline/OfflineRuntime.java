@@ -29,6 +29,58 @@ public final class OfflineRuntime {
     private record Bundle(String commit, String archiveHash, long archiveSize, List<Entry> entries) {}
     private OfflineRuntime() {}
 
+    /** Keep Windows native paths independent of a launcher's deeply nested game directory. */
+    public static Path installForGame(Path gameDirectory, String platform, String expectedCommit,
+                                      Consumer<String> status) throws IOException {
+        Resources resources = OfflineRuntime.class::getResourceAsStream;
+        Bundle bundle = readBundle(resources, "/mcef-offline/" + platform + "/", platform, expectedCommit);
+        String override = System.getProperty("mcef.offline.cacheDir", "").trim();
+        List<Path> candidates = new ArrayList<>();
+        if (!override.isEmpty()) {
+            Path explicit = Path.of(override);
+            if (!explicit.isAbsolute()) throw new IOException("mcef.offline.cacheDir must be absolute");
+            candidates.add(explicit);
+        } else if (platform.startsWith("windows_")) {
+            String local = System.getenv("LOCALAPPDATA");
+            if (local != null && !local.isBlank()) candidates.add(Path.of(local, "MCEF", "rt"));
+            String home = System.getProperty("user.home", "");
+            if (!home.isBlank()) candidates.add(Path.of(home, ".mcef-rt"));
+            String temp = System.getProperty("java.io.tmpdir", "");
+            if (!temp.isBlank()) candidates.add(Path.of(temp, "mcef-rt"));
+        } else {
+            candidates.add(gameDirectory.toRealPath().resolve("mods/mcef-libraries/offline"));
+        }
+        IOException unavailable = new IOException("No writable, short MCEF cache path. Set -Dmcef.offline.cacheDir to a short absolute directory you own.");
+        for (Path candidate : candidates) {
+            Path root = candidate.toAbsolutePath().normalize();
+            try {
+                checkNativePathBudget(root, platform, bundle);
+                safeDirectories(root);
+                // Probe writability, not just Files.isWritable (ACLs can disagree).
+                Path probe = Files.createTempFile(root, ".write-", ".tmp");
+                Files.delete(probe);
+            } catch (IOException e) {
+                unavailable.addSuppressed(e);
+                continue;
+            }
+            // Corrupt bundles/disk failures are not disguised as a cache-root fallback.
+            return install(root, platform, expectedCommit, resources, status);
+        }
+        throw unavailable;
+    }
+
+    private static void checkNativePathBudget(Path root, String platform, Bundle bundle) throws IOException {
+        if (!platform.startsWith("windows_")) return;
+        // Exactly the layout used below, including the longest bundled filename.
+        Path sample = root.resolve(bundle.commit).resolve(platform)
+                .resolve("g-" + "0".repeat(32)).resolve(platform);
+        for (Entry entry : bundle.entries) {
+            String full = sample.resolve(relative(entry.name)).toString();
+            if (full.length() > 240) throw new IOException("MCEF native path exceeds the 240-character safety budget (" + full.length()
+                    + "). Choose a shorter mcef.offline.cacheDir; no registry change is required.");
+        }
+    }
+
     public static Path install(Path root, String platform, String expectedCommit,
                                Consumer<String> status) throws IOException {
         return install(root, platform, expectedCommit, OfflineRuntime.class::getResourceAsStream, status);
@@ -41,6 +93,7 @@ public final class OfflineRuntime {
         String prefix = "/mcef-offline/" + platform + "/";
         Bundle bundle = readBundle(resources, prefix, platform, expectedCommit);
         root = root.toAbsolutePath().normalize();
+        checkNativePathBudget(root, platform, bundle);
         safeDirectories(root);
         Path home = root.resolve(bundle.commit).resolve(platform);
         safeDirectories(home);
@@ -51,7 +104,7 @@ public final class OfflineRuntime {
             Path pointer = home.resolve("current.txt");
             if (Files.isRegularFile(pointer, NOFOLLOW) && Files.size(pointer) < 256) {
                 String current = Files.readString(pointer, StandardCharsets.US_ASCII).trim();
-                if (current.matches("[a-f0-9]{64}-[a-f0-9-]{36}")) {
+                if (current.matches("g-[a-f0-9]{32}")) {
                     Path previous = home.resolve(current).resolve(platform);
                     status.accept("Checking local Chromium runtime");
                     if (valid(previous, bundle)) return previous;
@@ -72,7 +125,8 @@ public final class OfflineRuntime {
                         StandardOpenOption.CREATE_NEW);
                 if (!valid(extracted, bundle)) throw new IOException("Bundled MCEF runtime verification failed");
                 // Never overwrite a directory whose DLLs may be loaded by another game process.
-                Path installed = home.resolve(bundle.archiveHash + "-" + UUID.randomUUID());
+                // Full SHA-256 remains in the manifest and .complete marker, not the directory name.
+                Path installed = home.resolve("g-" + UUID.randomUUID().toString().replace("-", ""));
                 Files.move(extracted.getParent(), installed, StandardCopyOption.ATOMIC_MOVE);
                 Path nextPointer = staging.resolve("current.txt");
                 Files.writeString(nextPointer, installed.getFileName().toString(), StandardCharsets.US_ASCII);

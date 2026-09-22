@@ -101,9 +101,35 @@ jobs:
           if-no-files-found: error
           compression-level: 0
           retention-days: 7
+  native-windows:
+    name: Real Windows DLL loading / ${{ matrix.distribution }}
+    needs: platforms
+    strategy:
+      fail-fast: false
+      matrix:
+        distribution: [temurin, microsoft]
+    runs-on: windows-2025
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
+        with:
+          distribution: ${{ matrix.distribution }}
+          java-version: '25'
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: offline-platform-windows_amd64
+          path: build/windows-native-check
+      - name: Test deep game path, default cache, path guard and actual JCEF DLL loading
+        shell: pwsh
+        run: |
+          & java --enable-native-access=ALL-UNNAMED -cp build/windows-native-check/mcef-offline-neoforge-windows_amd64.jar offline/WindowsNativePathCheck.java
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
   publish:
     name: Publish verified platform attachments
-    needs: [test, build, platforms]
+    needs: [test, build, platforms, native-windows]
     if: github.repository == 'gaoshanliuni/MCEF-Offline' && github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
     runs-on: ubuntu-24.04
     timeout-minutes: 30

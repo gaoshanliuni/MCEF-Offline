@@ -47,8 +47,12 @@ Windows 使用 gradlew.bat；需要 Java 25、Python 3.11+。开发者/CI 构建
 
 ## 缓存、修复与测试
 
-缓存位于实例工作目录 `mods/mcef-libraries/offline/<jcef-commit>/<platform>/`。通过进程锁、临时目录、压缩包及逐文件 SHA-256 校验后才切换当前版本指针；修复时不覆盖可能被其它进程加载的 DLL。保留 macOS 符号链接及 Unix 可执行权限，拒绝路径穿越和未知条目。旧缓存不会自动删除；关闭全部游戏后可清理这个专用缓存目录。
+Windows 默认缓存位于 `%LOCALAPPDATA%\MCEF\rt`，不再受启动器的游戏目录长度影响；必要时尝试当前用户目录／临时目录。Linux/macOS 仍使用实例目录 `mods/mcef-libraries/offline/`。可用 `-Dmcef.offline.cacheDir=<绝对路径>` 显式指定自己可写的缓存位置。目录使用短生成编号，完整 SHA-256 仍保留用于校验；Windows 对每个包内文件执行 240 字符路径预算检查，不要求修改注册表或管理员权限。旧版长路径缓存不会被复用或自动删除。通过进程锁、临时目录、压缩包及逐文件 SHA-256 校验后才切换当前版本指针；修复时不覆盖可能被其它进程加载的 DLL。保留 macOS 符号链接及 Unix 可执行权限，拒绝路径穿越和未知条目。旧缓存不会自动删除；关闭全部游戏后可清理这个专用缓存目录。
 
 Windows/macOS/Linux 执行本地安装器单元测试；平台打包任务用真实 JAR 验证包内资源提取、复用和修复，但不加载浏览器原生代码。完整游戏验收仍需在游戏依赖已准备好的测试实例中断网启动，并检查本地网页渲染。
 
 许可：LGPL-2.1-or-later。详见 LICENSE、offline/THIRD_PARTY_NOTICES.md；发行附件提供完整对应源码。离线打包不解决旧 Chromium 自身的安全问题。
+
+## Windows 路径修复
+
+修复旧版缓存目录过长导致 `chrome_elf.dll: 文件名或扩展名太长` 的启动崩溃。新增 Windows 上 Microsoft/Temurin Java 25 的真实 `CefApp.startup`（DLL 加载链）测试，模拟长启动器目录及中文目录。此测试不等同于完整 Minecraft 界面渲染验收。替换对应平台 MCEF JAR 即可；不要同时保留原版在线 MCEF。
